@@ -8,7 +8,6 @@ import difflib
 st.set_page_config(page_title="Alocador Interativo", page_icon="🌍", layout="wide")
 
 # --- Variáveis de Memória (Estado da Sessão) ---
-# Isso impede que o Streamlit reinicie o processo a cada clique
 if 'status' not in st.session_state:
     st.session_state.status = 'setup' # setup, processing, resolving, finished
     st.session_state.allocated = []
@@ -48,11 +47,16 @@ def find_best_match(requested_del, committee_code, available_dels):
 if st.session_state.status == 'setup':
     st.title("🌍 Alocador Interativo - Setup")
     
+    st.header("📂 1. Arquivos Base")
     col1, col2 = st.columns(2)
     with col1:
         del_file = st.file_uploader("Upload das Vagas (Excel)", type=['xlsx'])
     with col2:
         insc_files = st.file_uploader("Upload das Inscrições (Forms)", type=['xlsx'], accept_multiple_files=True)
+
+    st.header("🔄 2. Continuar de Onde Parou? (Opcional)")
+    st.info("Se você já rodou o sistema antes e baixou uma planilha de alocação, faça o upload do CSV dela aqui para continuar de onde parou.")
+    prev_alloc_file = st.file_uploader("Upload da Planilha de Alocação Anterior (CSV)", type=['csv'])
 
     if del_file and insc_files:
         # Lê Delegações
@@ -80,8 +84,10 @@ if st.session_state.status == 'setup':
         insc_df = pd.concat(dfs, ignore_index=True).sort_values(by='Carimbo de data/hora').reset_index(drop=True)
         st.session_state.inscricoes_df = insc_df
 
+        st.divider()
+
         # Mapeamento
-        st.header("🔗 Mapeamento de Comitês")
+        st.header("🔗 3. Mapeamento de Comitês")
         comites_form = set()
         for i in range(1, 6):
             if f'{i}ª opção de comitê:' in insc_df.columns:
@@ -96,9 +102,11 @@ if st.session_state.status == 'setup':
                 if escolha != "-- Ignorar --":
                     committee_map[normalize_text(comite)] = normalize_text(escolha)
 
-        st.header("🌟 Delegados Estrela")
+        st.divider()
+
+        st.header("🌟 4. Delegados Estrela")
         todos_nomes = insc_df['Nome completo:'].dropna().unique().tolist()
-        estrelas = st.multiselect("Selecione os VIPs:", todos_nomes)
+        estrelas = st.multiselect("Selecione os VIPs (Eles furam a fila):", todos_nomes)
         config_estrelas = {}
         if estrelas:
             cols_star = st.columns(3)
@@ -107,12 +115,41 @@ if st.session_state.status == 'setup':
                     config_estrelas[nome] = st.selectbox(f"Opção para {nome}:", [1, 2, 3, 4, 5], key=f"opt_{nome}")
 
         if st.button("🚀 Iniciar Alocação", type="primary", use_container_width=True):
-            # Salva tudo no estado e inicia
             st.session_state.committee_map = committee_map
             st.session_state.available_delegations = available_dels_temp
             
-            # Aloca Estrelas
+            # --- PROCESSAR ALOCAÇÃO ANTERIOR (SE EXISTIR) ---
+            if prev_alloc_file:
+                try:
+                    prev_df = pd.read_csv(prev_alloc_file)
+                    # Verifica se tem as colunas padrão que nosso programa exporta
+                    if all(col in prev_df.columns for col in ['Nome', 'Comitê', 'Delegação']):
+                        for _, row in prev_df.iterrows():
+                            comite = str(row['Comitê'])
+                            delegacao = str(row['Delegação'])
+                            nome = str(row['Nome'])
+                            
+                            # Ignora quem tava sem alocação, para o robô tentar alocar agora
+                            if comite != 'NÃO ALOCADO' and delegacao != 'NÃO ALOCADO':
+                                # Adiciona aos já resolvidos
+                                st.session_state.allocated.append(row.to_dict())
+                                st.session_state.pre_allocated_names.add(nome)
+                                
+                                # Tenta remover a vaga para ninguém roubar
+                                comite_key = normalize_text(comite)
+                                if comite_key in st.session_state.available_delegations:
+                                    match = find_best_match(delegacao, comite_key, st.session_state.available_delegations)
+                                    if match:
+                                        st.session_state.available_delegations[comite_key].remove(match)
+                except Exception as e:
+                    st.error(f"Erro ao ler arquivo anterior: {e}")
+
+            # --- PROCESSAR ESTRELAS NOVAS ---
             for nome in estrelas:
+                # Se a estrela já estava no arquivo antigo, a gente pula pra não duplicar
+                if nome in st.session_state.pre_allocated_names:
+                    continue
+                    
                 p_row = insc_df[insc_df['Nome completo:'] == nome].iloc[0]
                 op = config_estrelas[nome]
                 c_col = f'{op}ª opção de comitê:'
@@ -173,18 +210,17 @@ if st.session_state.status == 'processing':
                 break
                 
         if not alocado:
-            # TRAVA O PROCESSO!
             st.session_state.person_to_resolve = row
             st.session_state.status = 'resolving'
             st.rerun()
-            break # Sai do loop para a tela atualizar
+            break
             
     if st.session_state.current_idx >= len(df):
         st.session_state.status = 'finished'
         st.rerun()
 
 # =====================================================================
-# FASE 3: RESOLUÇÃO MANUAL (O Processo Travou)
+# FASE 3: RESOLUÇÃO MANUAL
 # =====================================================================
 if st.session_state.status == 'resolving':
     row = st.session_state.person_to_resolve
@@ -192,10 +228,8 @@ if st.session_state.status == 'resolving':
     
     st.error(f"⚠️ PROCESSO PAUSADO: {nome} não conseguiu vaga!")
     
-    # Exibe os contatos da pessoa
     st.subheader(f"👤 Dados de {nome}")
     col_info1, col_info2 = st.columns(2)
-    # Busca e-mail e celular dinamicamente se existir
     email = next((row[c] for c in row.keys() if 'mail' in str(c).lower() and not pd.isna(row[c])), "Não informado")
     celular = next((row[c] for c in row.keys() if 'celular' in str(c).lower() or 'telefone' in str(c).lower() and not pd.isna(row[c])), "Não informado")
     
@@ -204,7 +238,6 @@ if st.session_state.status == 'resolving':
     if not pd.isna(row.get('Nome completo da dupla (se houver):')):
         st.write(f"**Dupla:** {row['Nome completo da dupla (se houver):']}")
 
-    # Mostra as opções que ele tinha escolhido
     st.write("**Opções Originais (Frustradas):**")
     for i in range(1, 6):
         c_col = row.get(f'{i}ª opção de comitê:', '')
@@ -214,12 +247,10 @@ if st.session_state.status == 'resolving':
 
     st.divider()
 
-    # Painel Visual de Decisão
     col_vagas, col_acao = st.columns([2, 1])
     
     with col_vagas:
-        st.subheader("📋 Vagas Disponíveis (Atualizadas)")
-        # Transforma o dicionário em um DataFrame bonitinho (preenchendo vazios para igualar colunas)
+        st.subheader("📋 Vagas Disponíveis")
         vagas_atuais = st.session_state.available_delegations
         max_len = max([len(v) for v in vagas_atuais.values()]) if vagas_atuais else 0
         df_vagas = pd.DataFrame({k: v + [""]*(max_len - len(v)) for k, v in vagas_atuais.items()})
@@ -227,7 +258,7 @@ if st.session_state.status == 'resolving':
 
     with col_acao:
         st.subheader("🛠️ Ação Manual")
-        comite_escolhido = st.selectbox("Escolha um Comitê para alocar:", list(vagas_atuais.keys()))
+        comite_escolhido = st.selectbox("Escolha um Comitê:", list(vagas_atuais.keys()))
         
         opcoes_del = vagas_atuais.get(comite_escolhido, [])
         if opcoes_del:
@@ -246,7 +277,7 @@ if st.session_state.status == 'resolving':
             st.warning("Comitê cheio!")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("⏭️ Deixar Sem Vaga (Pular)", use_container_width=True):
+        if st.button("⏭️ Pular / Deixar sem vaga", use_container_width=True):
             st.session_state.allocated.append({
                 'Timestamp': row['Carimbo de data/hora'], 'Nome': nome,
                 'Comitê': "NÃO ALOCADO", 'Delegação': "NÃO ALOCADO", 'Opção': "N/A",
@@ -275,8 +306,8 @@ if st.session_state.status == 'finished':
     colA, colB = st.columns(2)
     with colA:
         csv = df_final.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button("📥 Baixar Planilha Final", data=csv, file_name='alocacao_final.csv', mime='text/csv', type="primary")
+        st.download_button("📥 Baixar Planilha Final (CSV)", data=csv, file_name='alocacao_final.csv', mime='text/csv', type="primary")
     with colB:
-        if st.button("🔄 Reiniciar Tudo"):
+        if st.button("🔄 Novo Processo"):
             for key in st.session_state.keys(): del st.session_state[key]
             st.rerun()
