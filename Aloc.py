@@ -41,6 +41,16 @@ def find_best_match(requested_del, committee_code, available_dels):
     if matches: return available[avail_norm.index(matches[0])]
     return None
 
+def extrair_dados_pessoais(row):
+    """Busca dinamicamente colunas de contato na linha do forms"""
+    if row is None: return {'E-mail': '', 'Celular': '', 'Instituição': ''}
+    
+    email = next((row[c] for c in row.keys() if 'mail' in str(c).lower() and not pd.isna(row[c])), "")
+    celular = next((row[c] for c in row.keys() if ('celular' in str(c).lower() or 'telefone' in str(c).lower()) and not pd.isna(row[c])), "")
+    instituicao = next((row[c] for c in row.keys() if ('instituição' in str(c).lower() or 'unidade' in str(c).lower() or 'escola' in str(c).lower()) and not pd.isna(row[c])), "")
+    
+    return {'E-mail': email, 'Celular': celular, 'Instituição': instituicao}
+
 # =====================================================================
 # FASE 1: SETUP (Upload e Mapeamento)
 # =====================================================================
@@ -122,20 +132,16 @@ if st.session_state.status == 'setup':
             if prev_alloc_file:
                 try:
                     prev_df = pd.read_csv(prev_alloc_file)
-                    # Verifica se tem as colunas padrão que nosso programa exporta
                     if all(col in prev_df.columns for col in ['Nome', 'Comitê', 'Delegação']):
                         for _, row in prev_df.iterrows():
                             comite = str(row['Comitê'])
                             delegacao = str(row['Delegação'])
                             nome = str(row['Nome'])
                             
-                            # Ignora quem tava sem alocação, para o robô tentar alocar agora
                             if comite != 'NÃO ALOCADO' and delegacao != 'NÃO ALOCADO':
-                                # Adiciona aos já resolvidos
                                 st.session_state.allocated.append(row.to_dict())
                                 st.session_state.pre_allocated_names.add(nome)
                                 
-                                # Tenta remover a vaga para ninguém roubar
                                 comite_key = normalize_text(comite)
                                 if comite_key in st.session_state.available_delegations:
                                     match = find_best_match(delegacao, comite_key, st.session_state.available_delegations)
@@ -146,7 +152,6 @@ if st.session_state.status == 'setup':
 
             # --- PROCESSAR ESTRELAS NOVAS ---
             for nome in estrelas:
-                # Se a estrela já estava no arquivo antigo, a gente pula pra não duplicar
                 if nome in st.session_state.pre_allocated_names:
                     continue
                     
@@ -160,11 +165,14 @@ if st.session_state.status == 'setup':
                     if c_code:
                         match = find_best_match(p_row[d_col], c_code, st.session_state.available_delegations)
                         if match:
-                            st.session_state.allocated.append({
+                            dados = {
                                 'Timestamp': p_row['Carimbo de data/hora'], 'Nome': nome,
                                 'Comitê': c_code.upper(), 'Delegação': match, 'Opção': f"{op} (VIP)",
                                 'Dupla': p_row.get('Nome completo da dupla (se houver):', "")
-                            })
+                            }
+                            dados.update(extrair_dados_pessoais(p_row)) # Adiciona contato
+                            st.session_state.allocated.append(dados)
+                            
                             st.session_state.available_delegations[c_code].remove(match)
                             st.session_state.pre_allocated_names.add(nome)
 
@@ -199,11 +207,14 @@ if st.session_state.status == 'processing':
                 
             match = find_best_match(row[d_col], c_code, vagas)
             if match:
-                st.session_state.allocated.append({
+                dados = {
                     'Timestamp': row['Carimbo de data/hora'], 'Nome': name,
                     'Comitê': c_code.upper(), 'Delegação': match, 'Opção': i,
                     'Dupla': row.get('Nome completo da dupla (se houver):', "")
-                })
+                }
+                dados.update(extrair_dados_pessoais(row)) # Adiciona contato
+                st.session_state.allocated.append(dados)
+                
                 vagas[c_code].remove(match)
                 alocado = True
                 st.session_state.current_idx += 1
@@ -228,15 +239,18 @@ if st.session_state.status == 'resolving':
     
     st.error(f"⚠️ PROCESSO PAUSADO: {nome} não conseguiu vaga!")
     
+    # Busca dados pessoais usando a nova função
+    dados_pessoais = extrair_dados_pessoais(row)
+    
     st.subheader(f"👤 Dados de {nome}")
     col_info1, col_info2 = st.columns(2)
-    email = next((row[c] for c in row.keys() if 'mail' in str(c).lower() and not pd.isna(row[c])), "Não informado")
-    celular = next((row[c] for c in row.keys() if 'celular' in str(c).lower() or 'telefone' in str(c).lower() and not pd.isna(row[c])), "Não informado")
     
-    col_info1.write(f"**E-mail:** {email}")
-    col_info2.write(f"**Celular:** {celular}")
+    col_info1.write(f"**E-mail:** {dados_pessoais['E-mail'] or 'Não informado'}")
+    col_info2.write(f"**Celular:** {dados_pessoais['Celular'] or 'Não informado'}")
+    
+    col_info1.write(f"**Instituição:** {dados_pessoais['Instituição'] or 'Não informado'}")
     if not pd.isna(row.get('Nome completo da dupla (se houver):')):
-        st.write(f"**Dupla:** {row['Nome completo da dupla (se houver):']}")
+        col_info2.write(f"**Dupla:** {row['Nome completo da dupla (se houver):']}")
 
     st.write("**Opções Originais (Frustradas):**")
     for i in range(1, 6):
@@ -264,11 +278,14 @@ if st.session_state.status == 'resolving':
         if opcoes_del:
             del_escolhida = st.selectbox("Escolha a Delegação:", opcoes_del)
             if st.button("✅ Confirmar Alocação", type="primary", use_container_width=True):
-                st.session_state.allocated.append({
+                dados = {
                     'Timestamp': row['Carimbo de data/hora'], 'Nome': nome,
                     'Comitê': comite_escolhido.upper(), 'Delegação': del_escolhida, 'Opção': "MANUAL",
                     'Dupla': row.get('Nome completo da dupla (se houver):', "")
-                })
+                }
+                dados.update(dados_pessoais) # Adiciona contato
+                st.session_state.allocated.append(dados)
+                
                 st.session_state.available_delegations[comite_escolhido].remove(del_escolhida)
                 st.session_state.current_idx += 1
                 st.session_state.status = 'processing'
@@ -278,11 +295,14 @@ if st.session_state.status == 'resolving':
 
         st.markdown("<br>", unsafe_allow_html=True)
         if st.button("⏭️ Pular / Deixar sem vaga", use_container_width=True):
-            st.session_state.allocated.append({
+            dados = {
                 'Timestamp': row['Carimbo de data/hora'], 'Nome': nome,
                 'Comitê': "NÃO ALOCADO", 'Delegação': "NÃO ALOCADO", 'Opção': "N/A",
                 'Dupla': row.get('Nome completo da dupla (se houver):', "")
-            })
+            }
+            dados.update(dados_pessoais) # Adiciona contato
+            st.session_state.allocated.append(dados)
+            
             st.session_state.current_idx += 1
             st.session_state.status = 'processing'
             st.rerun()
