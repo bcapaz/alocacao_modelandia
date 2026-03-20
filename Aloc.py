@@ -76,19 +76,36 @@ if st.session_state.status == 'setup':
             dels = delegacoes_df[col].dropna().astype(str).str.strip().tolist()
             available_dels_temp[normalize_text(col)] = [d.strip() for d in dels if d.strip()]
 
-        # Lê Inscrições
+# Lê Inscrições (Busca Ultra Resiliente)
         dfs = []
         for f in insc_files:
             df = pd.read_excel(f)
             df.columns = df.columns.astype(str).str.strip()
-            colunas_tempo = ['Carimbo de data/hora', 'Timestamp', 'Data/Hora']
-            if not any(col in df.columns for col in colunas_tempo):
+            
+            # Função interna para "caçar" a coluna de tempo não importa como esteja escrita
+            def achar_coluna_tempo(colunas):
+                for c in colunas:
+                    c_lower = str(c).lower()
+                    if 'carimbo' in c_lower or 'timestamp' in c_lower or 'data/hora' in c_lower or 'data e hora' in c_lower:
+                        return c
+                return None
+                
+            col_tempo = achar_coluna_tempo(df.columns)
+            
+            # Se não achou na primeira linha, pula as 3 linhas de legenda e tenta de novo
+            if not col_tempo:
                 df = pd.read_excel(f, skiprows=3)
                 df.columns = df.columns.astype(str).str.strip()
-            for col in colunas_tempo:
-                if col in df.columns:
-                    df.rename(columns={col: 'Carimbo de data/hora'}, inplace=True)
-                    break
+                col_tempo = achar_coluna_tempo(df.columns)
+                
+            # Se achou, padroniza o nome para o resto do código funcionar
+            if col_tempo:
+                df.rename(columns={col_tempo: 'Carimbo de data/hora'}, inplace=True)
+            else:
+                # Se realmente não existir, ele avisa você na tela em vez de quebrar o site
+                st.error(f"Erro: Não encontrei a coluna de Data/Hora no arquivo {f.name}. Verifique a planilha.")
+                st.stop()
+                
             dfs.append(df)
         
         insc_df = pd.concat(dfs, ignore_index=True).sort_values(by='Carimbo de data/hora').reset_index(drop=True)
